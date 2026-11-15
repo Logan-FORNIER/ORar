@@ -1958,8 +1958,11 @@ export function ToolsCenterModal({
                   Intégration native Windows (HKCU — Sans droits administrateur)
                 </div>
                 <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                  Enregistre ORar pour votre session Windows afin d'ouvrir les fichiers{' '}
-                  <span className="font-mono">.orar</span> par double-clic et d'ajouter « Ouvrir avec ORar » dans le menu clic-droit.
+                  Enregistre ORar dans Windows 11 afin d'apparaître dans{' '}
+                  <span className="font-semibold">« Ouvrir avec &gt; »</span> pour tous les formats
+                  d'archives (<span className="font-mono">.rar, .zip, .7z, .orar, .tar.gz, .tar.zst…</span>),
+                  d'ouvrir les <span className="font-mono">.orar</span> par double-clic et d'ajouter
+                  les actions rapides au clic droit.
                 </p>
                 {winStatus && (
                   <p className="mt-2 truncate font-mono text-[10px] text-slate-400">
@@ -1970,9 +1973,12 @@ export function ToolsCenterModal({
 
               <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-200 p-3.5 dark:border-slate-800">
                 <div>
-                  <div className="font-semibold">Associer l'extension .orar à ORar</div>
+                  <div className="font-semibold">
+                    Associer .orar et enregistrer dans « Ouvrir avec &gt; »
+                  </div>
                   <div className="text-[11px] text-slate-500">
-                    Ouvre automatiquement tout fichier .orar dans ORar
+                    Ouvre les .orar par double-clic et affiche ORar dans « Ouvrir avec &gt; » sur
+                    .rar, .zip, .7z, .tar, .gz, .xz, .zst…
                   </div>
                 </div>
                 <input
@@ -1985,9 +1991,12 @@ export function ToolsCenterModal({
 
               <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-200 p-3.5 dark:border-slate-800">
                 <div>
-                  <div className="font-semibold">Menu contextuel Windows « Ouvrir avec ORar »</div>
+                  <div className="font-semibold">
+                    Menu contextuel Windows (Ouvrir, Extraire ici, Extraire dans un dossier)
+                  </div>
                   <div className="text-[11px] text-slate-500">
-                    Ajoute un raccourci clic-droit sur vos fichiers Windows
+                    Ajoute « Ouvrir avec ORar », « Extraire ici avec ORar » et « Extraire dans un
+                    dossier avec ORar » au clic droit
                   </div>
                 </div>
                 <input

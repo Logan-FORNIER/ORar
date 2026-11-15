@@ -25,7 +25,7 @@ use crate::types::{
     entry_basename, hex_encode, normalize_archive_path, AppUpdateInfo, ArchiveDiffItem,
     ArchiveDiffReport, ArchiveEntry, ArchiveInfo, BatchOperationReport, BatchOperationRequest,
     BenchmarkResult, ContentSearchMatch, ConvertArchiveRequest, CreateArchiveRequest, EntryHashes,
-    ExtractArchiveRequest, SfxReport, SplitReport, StegoCreateRequest, StegoReport,
+    ExtractArchiveRequest, LaunchAction, SfxReport, SplitReport, StegoCreateRequest, StegoReport,
     UpdateInstallReport, WindowsIntegrationStatus,
 };
 
@@ -490,6 +490,12 @@ pub fn run_compression_benchmark() -> Result<Vec<BenchmarkResult>, String> {
 }
 
 #[cfg(windows)]
+const SUPPORTED_ARCHIVE_EXTS: &[&str] = &[
+    ".orar", ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz", ".zst",
+    ".tzst",
+];
+
+#[cfg(windows)]
 fn run_reg_command(args: &[&str]) -> Result<bool, String> {
     use std::os::windows::process::CommandExt;
     let output = Command::new("reg.exe")
@@ -500,6 +506,43 @@ fn run_reg_command(args: &[&str]) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+#[cfg(windows)]
+fn register_shell_verb(
+    base_key: &str,
+    label: &str,
+    icon: &str,
+    command: &str,
+    friendly_app_name: Option<&str>,
+) -> Result<(), String> {
+    run_reg_command(&["add", base_key, "/ve", "/d", label, "/f"])?;
+    run_reg_command(&["add", base_key, "/v", "Icon", "/d", icon, "/f"])?;
+    if let Some(app_name) = friendly_app_name {
+        run_reg_command(&["add", base_key, "/v", "FriendlyAppName", "/d", app_name, "/f"])?;
+    }
+    let cmd_key = format!(r"{base_key}\command");
+    run_reg_command(&["add", &cmd_key, "/ve", "/d", command, "/f"])?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn notify_shell_assoc_changed() {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHChangeNotify(
+            w_event_id: i32,
+            u_flags: u32,
+            dw_item1: *const std::ffi::c_void,
+            dw_item2: *const std::ffi::c_void,
+        );
+    }
+    const SHCNE_ASSOCCHANGED: i32 = 0x0800_0000;
+    const SHCNF_IDLIST: u32 = 0x0000;
+    // Notify Windows Explorer to refresh "Ouvrir avec >" and file associations immediately.
+    unsafe {
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, std::ptr::null(), std::ptr::null());
+    }
+}
+
 /// Inspect current per-user Windows registry integration (HKCU, no admin needed).
 pub fn get_windows_integration_status() -> WindowsIntegrationStatus {
     let exe_path = std::env::current_exe()
@@ -508,10 +551,15 @@ pub fn get_windows_integration_status() -> WindowsIntegrationStatus {
 
     #[cfg(windows)]
     {
-        let orar_associated =
-            run_reg_command(&["query", r"HKCU\Software\Classes\.orar"]).unwrap_or(false);
+        let orar_associated = run_reg_command(&["query", r"HKCU\Software\Classes\.orar"])
+            .unwrap_or(false)
+            && run_reg_command(&["query", r"HKCU\Software\Classes\Applications\orar.exe"])
+                .unwrap_or(false);
         let context_menu_enabled =
-            run_reg_command(&["query", r"HKCU\Software\Classes\*\shell\ORarOpen"]).unwrap_or(false);
+            run_reg_command(&["query", r"HKCU\Software\Classes\*\shell\ORarOpen"])
+                .unwrap_or(false)
+                && run_reg_command(&["query", r"HKCU\Software\Classes\*\shell\ORarExtractHere"])
+                    .unwrap_or(false);
         WindowsIntegrationStatus {
             orar_associated,
             context_menu_enabled,
@@ -527,7 +575,7 @@ pub fn get_windows_integration_status() -> WindowsIntegrationStatus {
     }
 }
 
-/// Enable or remove `.orar` file association and Windows right-click "Ouvrir avec ORar" in HKCU.
+/// Enable or remove archive file associations ("Ouvrir avec >") and Windows right-click actions in HKCU.
 pub fn set_windows_integration(
     associate_orar: bool,
     context_menu: bool,
@@ -537,71 +585,201 @@ pub fn set_windows_integration(
         let exe = std::env::current_exe()
             .map_err(|e| format!("Impossible de localiser l'exécutable ORar : {e}"))?;
         let exe_str = exe.to_string_lossy().to_string();
+        let icon = format!("\"{exe_str}\",0");
         let open_cmd = format!("\"{exe_str}\" \"%1\"");
+        let extract_here_cmd = format!("\"{exe_str}\" --extract-here \"%1\"");
+        let extract_folder_cmd = format!("\"{exe_str}\" --extract-to-folder \"%1\"");
 
         if associate_orar {
             run_reg_command(&["add", r"HKCU\Software\Classes\.orar", "/ve", "/d", "ORar.Archive", "/f"])?;
             run_reg_command(&["add", r"HKCU\Software\Classes\ORar.Archive", "/ve", "/d", "Archive ORar", "/f"])?;
             run_reg_command(&[
                 "add",
+                r"HKCU\Software\Classes\ORar.Archive",
+                "/v",
+                "FriendlyTypeName",
+                "/d",
+                "Archive ORar",
+                "/f",
+            ])?;
+            run_reg_command(&[
+                "add",
                 r"HKCU\Software\Classes\ORar.Archive\DefaultIcon",
                 "/ve",
                 "/d",
-                &format!("\"{exe_str}\",0"),
+                &icon,
+                "/f",
+            ])?;
+
+            register_shell_verb(
+                r"HKCU\Software\Classes\ORar.Archive\shell\open",
+                "Ouvrir avec ORar",
+                &icon,
+                &open_cmd,
+                Some("ORar"),
+            )?;
+            register_shell_verb(
+                r"HKCU\Software\Classes\ORar.Archive\shell\extract_here",
+                "Extraire ici avec ORar",
+                &icon,
+                &extract_here_cmd,
+                None,
+            )?;
+            register_shell_verb(
+                r"HKCU\Software\Classes\ORar.Archive\shell\extract_folder",
+                "Extraire dans un dossier avec ORar",
+                &icon,
+                &extract_folder_cmd,
+                None,
+            )?;
+
+            run_reg_command(&[
+                "add",
+                r"HKCU\Software\Classes\Applications\orar.exe",
+                "/v",
+                "FriendlyAppName",
+                "/d",
+                "ORar",
                 "/f",
             ])?;
             run_reg_command(&[
                 "add",
-                r"HKCU\Software\Classes\ORar.Archive\shell\open\command",
+                r"HKCU\Software\Classes\Applications\orar.exe\DefaultIcon",
                 "/ve",
                 "/d",
-                &open_cmd,
+                &icon,
                 "/f",
             ])?;
+            register_shell_verb(
+                r"HKCU\Software\Classes\Applications\orar.exe\shell\open",
+                "Ouvrir avec ORar",
+                &icon,
+                &open_cmd,
+                Some("ORar"),
+            )?;
+
+            for ext in SUPPORTED_ARCHIVE_EXTS {
+                run_reg_command(&[
+                    "add",
+                    r"HKCU\Software\Classes\Applications\orar.exe\SupportedTypes",
+                    "/v",
+                    ext,
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "",
+                    "/f",
+                ])?;
+                let open_with_progids = format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids");
+                run_reg_command(&[
+                    "add",
+                    &open_with_progids,
+                    "/v",
+                    "ORar.Archive",
+                    "/t",
+                    "REG_NONE",
+                    "/f",
+                ])?;
+                let open_with_list = format!(r"HKCU\Software\Classes\{ext}\OpenWithList\orar.exe");
+                run_reg_command(&["add", &open_with_list, "/ve", "/d", "", "/f"])?;
+            }
         } else {
             let _ = run_reg_command(&["delete", r"HKCU\Software\Classes\.orar", "/f"]);
             let _ = run_reg_command(&["delete", r"HKCU\Software\Classes\ORar.Archive", "/f"]);
+            let _ = run_reg_command(&["delete", r"HKCU\Software\Classes\Applications\orar.exe", "/f"]);
+            for ext in SUPPORTED_ARCHIVE_EXTS {
+                let open_with_progids = format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids");
+                let _ = run_reg_command(&["delete", &open_with_progids, "/v", "ORar.Archive", "/f"]);
+                let open_with_list = format!(r"HKCU\Software\Classes\{ext}\OpenWithList\orar.exe");
+                let _ = run_reg_command(&["delete", &open_with_list, "/f"]);
+            }
         }
 
         if context_menu {
-            run_reg_command(&[
-                "add",
+            register_shell_verb(
                 r"HKCU\Software\Classes\*\shell\ORarOpen",
-                "/ve",
-                "/d",
                 "Ouvrir avec ORar",
-                "/f",
-            ])?;
-            run_reg_command(&[
-                "add",
-                r"HKCU\Software\Classes\*\shell\ORarOpen",
-                "/v",
-                "Icon",
-                "/d",
-                &format!("\"{exe_str}\",0"),
-                "/f",
-            ])?;
-            run_reg_command(&[
-                "add",
-                r"HKCU\Software\Classes\*\shell\ORarOpen\command",
-                "/ve",
-                "/d",
+                &icon,
                 &open_cmd,
-                "/f",
-            ])?;
+                Some("ORar"),
+            )?;
+            register_shell_verb(
+                r"HKCU\Software\Classes\*\shell\ORarExtractHere",
+                "Extraire ici avec ORar",
+                &icon,
+                &extract_here_cmd,
+                None,
+            )?;
+            register_shell_verb(
+                r"HKCU\Software\Classes\*\shell\ORarExtractFolder",
+                "Extraire dans un dossier avec ORar",
+                &icon,
+                &extract_folder_cmd,
+                None,
+            )?;
         } else {
             let _ = run_reg_command(&["delete", r"HKCU\Software\Classes\*\shell\ORarOpen", "/f"]);
+            let _ = run_reg_command(&["delete", r"HKCU\Software\Classes\*\shell\ORarExtractHere", "/f"]);
+            let _ = run_reg_command(&["delete", r"HKCU\Software\Classes\*\shell\ORarExtractFolder", "/f"]);
         }
+
+        notify_shell_assoc_changed();
     }
 
     Ok(get_windows_integration_status())
 }
 
+fn compute_extract_folder_dest(archive_path: &Path) -> Option<String> {
+    let parent = archive_path.parent()?;
+    let file_name = archive_path.file_name()?.to_string_lossy();
+    let lower = file_name.to_ascii_lowercase();
+    let compound_exts = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"];
+    let stem = if let Some(ext) = compound_exts.iter().find(|ext| lower.ends_with(*ext)) {
+        &file_name[..file_name.len() - ext.len()]
+    } else {
+        archive_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("archive")
+    };
+    let folder_name = if stem.is_empty() { "archive" } else { stem };
+    Some(parent.join(folder_name).to_string_lossy().to_string())
+}
+
+/// Return structured startup action parsed from CLI arguments (open, extract-here, extract-to-folder).
+pub fn get_launch_action() -> Option<LaunchAction> {
+    let mut mode = "open".to_string();
+    let mut file_path: Option<String> = None;
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--extract-here" => mode = "extract_here".to_string(),
+            "--extract-to-folder" => mode = "extract_to_folder".to_string(),
+            _ if !arg.starts_with('-') && file_path.is_none() && Path::new(&arg).is_file() => {
+                file_path = Some(arg);
+            }
+            _ => {}
+        }
+    }
+
+    let path = file_path?;
+    let p = Path::new(&path);
+    let target_dir = match mode.as_str() {
+        "extract_here" => p.parent().map(|dir| dir.to_string_lossy().to_string()),
+        "extract_to_folder" => compute_extract_folder_dest(p),
+        _ => None,
+    };
+
+    Some(LaunchAction {
+        path,
+        mode,
+        target_dir,
+    })
+}
+
 /// Return the first existing file path passed via CLI arguments (e.g. from Windows Explorer double-click).
 pub fn get_launch_args() -> Option<String> {
-    std::env::args()
-        .skip(1)
-        .find(|arg| !arg.starts_with('-') && Path::new(arg).is_file())
+    get_launch_action().map(|action| action.path)
 }
 
 // ============================================================================

@@ -213,6 +213,15 @@ pub struct WindowsIntegrationStatus {
     pub exe_path: String,
 }
 
+/// Startup action parsed from command-line arguments when launched from Windows Explorer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchAction {
+    pub path: String,
+    pub mode: String,
+    pub target_dir: Option<String>,
+}
+
 /// Single entry comparison row in an archive diff report.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

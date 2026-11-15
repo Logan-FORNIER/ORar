@@ -151,6 +151,12 @@ export interface WindowsIntegrationStatus {
   exePath: string;
 }
 
+export interface LaunchAction {
+  path: string;
+  mode: 'open' | 'extract_here' | 'extract_to_folder';
+  targetDir?: string | null;
+}
+
 export interface ArchiveDiffItem {
   path: string;
   status: 'added' | 'removed' | 'modified' | 'unchanged';

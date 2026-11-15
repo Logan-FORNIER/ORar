@@ -12,8 +12,8 @@ use crate::types::{
     AppUpdateInfo, ArchiveDiffReport, ArchiveInfo, ArchiveMutationRequest, BatchOperationReport,
     BatchOperationRequest, BenchmarkResult, ContentSearchMatch, ConvertArchiveRequest,
     CreateArchiveRequest, DirectoryListing, EntryHashes, ExtractArchiveRequest, IntegrityReport,
-    PreviewFileResponse, ProgressPayload, RepairReport, SfxReport, SplitReport, StegoCreateRequest,
-    StegoReport, UpdateInstallReport, WindowsIntegrationStatus,
+    LaunchAction, PreviewFileResponse, ProgressPayload, RepairReport, SfxReport, SplitReport,
+    StegoCreateRequest, StegoReport, UpdateInstallReport, WindowsIntegrationStatus,
 };
 
 fn emit_progress(app: &AppHandle, operation: &str, current_file: &str, processed: usize, total: usize) {
@@ -229,6 +229,11 @@ fn set_windows_integration(
 #[tauri::command]
 fn get_launch_args() -> Option<String> {
     tools::get_launch_args()
+}
+
+#[tauri::command]
+fn get_launch_action() -> Option<LaunchAction> {
+    tools::get_launch_action()
 }
 
 #[tauri::command]
@@ -459,6 +464,7 @@ pub fn run() {
             get_windows_integration_status,
             set_windows_integration,
             get_launch_args,
+            get_launch_action,
             list_directory,
             create_demo_archive,
             compare_archives,

@@ -60,6 +60,7 @@ import {
   EntryHashes,
   FilterKind,
   IntegrityReport,
+  LaunchAction,
   PreviewFileResponse,
   ProgressPayload,
   RecentArchive,
@@ -331,12 +332,59 @@ export function App() {
     [archive?.archivePath, pushRecentArchive, requestPassword, sessionPassword, showStatus]
   );
 
-  // Check if launched with a file argument from Windows Explorer
+  const runAutoExtractFromLaunch = useCallback(
+    async (archivePath: string, destDir: string, pwOverride?: string) => {
+      const archiveName = archivePath.split(/[/\\]/).pop() || archivePath;
+      setBusy(true);
+      setProgress({
+        operation: 'extract',
+        currentFile: archiveName,
+        processed: 0,
+        total: 1,
+        percent: 0,
+      });
+      try {
+        const msg = await invoke<string>('extract_archive', {
+          req: {
+            archivePath,
+            destinationDir: destDir,
+            selectedEntries: null,
+            password: pwOverride ?? null,
+          },
+        });
+        await openArchivePath(archivePath, pwOverride);
+        showStatus('ok', msg);
+        await invoke('reveal_in_explorer', { path: destDir }).catch(() => {});
+      } catch (err) {
+        const pwReason = parsePasswordError(err);
+        if (pwReason) {
+          requestPassword(pwReason, archiveName, (pw) => {
+            setSessionPassword(pw);
+            runAutoExtractFromLaunch(archivePath, destDir, pw);
+          });
+        } else {
+          showStatus('err', String(err));
+        }
+      } finally {
+        setBusy(false);
+        setProgress(null);
+      }
+    },
+    [openArchivePath, requestPassword, showStatus]
+  );
+
+  // Check if launched with a file argument or quick-extract flag from Windows Explorer
   useEffect(() => {
-    invoke<string | null>('get_launch_args')
-      .then((argPath) => {
-        if (argPath && isSupportedArchivePath(argPath)) {
-          openArchivePath(argPath);
+    invoke<LaunchAction | null>('get_launch_action')
+      .then((action) => {
+        if (!action || !isSupportedArchivePath(action.path)) return;
+        if (
+          (action.mode === 'extract_here' || action.mode === 'extract_to_folder') &&
+          action.targetDir
+        ) {
+          runAutoExtractFromLaunch(action.path, action.targetDir);
+        } else {
+          openArchivePath(action.path);
         }
       })
       .catch(() => {});
