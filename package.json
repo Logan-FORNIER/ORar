@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "build:installer": "tauri build --bundles nsis"
+    "build:installer": "tauri build --bundles nsis",
+    "tag": "node scripts/release-tag.mjs",
+    "release": "node scripts/release-tag.mjs --push"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

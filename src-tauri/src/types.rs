@@ -308,6 +308,32 @@ pub struct SfxReport {
     pub message: String,
 }
 
+/// Information returned when checking GitHub Releases for application updates.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub tag_name: String,
+    pub update_available: bool,
+    pub release_name: String,
+    pub release_notes: String,
+    pub published_at: Option<String>,
+    pub html_url: String,
+    pub installer_url: Option<String>,
+    pub installer_name: Option<String>,
+    pub installer_size: Option<u64>,
+}
+
+/// Report returned after downloading and launching a new installer from GitHub Releases.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallReport {
+    pub downloaded_path: String,
+    pub launched: bool,
+    pub message: String,
+}
+
 /// Single filesystem entry used by the built-in PC explorer sidebar.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

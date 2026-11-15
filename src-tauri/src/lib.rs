@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::types::{
-    ArchiveDiffReport, ArchiveInfo, ArchiveMutationRequest, BatchOperationReport,
+    AppUpdateInfo, ArchiveDiffReport, ArchiveInfo, ArchiveMutationRequest, BatchOperationReport,
     BatchOperationRequest, BenchmarkResult, ContentSearchMatch, ConvertArchiveRequest,
     CreateArchiveRequest, DirectoryListing, EntryHashes, ExtractArchiveRequest, IntegrityReport,
     PreviewFileResponse, ProgressPayload, RepairReport, SfxReport, SplitReport, StegoCreateRequest,
-    StegoReport, WindowsIntegrationStatus,
+    StegoReport, UpdateInstallReport, WindowsIntegrationStatus,
 };
 
 fn emit_progress(app: &AppHandle, operation: &str, current_file: &str, processed: usize, total: usize) {
@@ -410,6 +410,30 @@ async fn create_demo_archive(app: AppHandle) -> Result<ArchiveInfo, String> {
     .map_err(|e| format!("Erreur interne démo : {e}"))?
 }
 
+#[tauri::command]
+async fn check_app_update() -> Result<AppUpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(|| tools::check_app_update(None))
+        .await
+        .map_err(|e| format!("Erreur vérification mise à jour : {e}"))?
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    installer_url: String,
+    installer_name: Option<String>,
+) -> Result<UpdateInstallReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::download_and_install_update(&installer_url, installer_name.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Erreur téléchargement mise à jour : {e}"))?
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    tools::open_external_url(&url)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -441,7 +465,10 @@ pub fn run() {
             run_batch_operation,
             create_stego_archive,
             extract_stego_archive,
-            create_sfx_bundle
+            create_sfx_bundle,
+            check_app_update,
+            download_and_install_update,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running ORar");

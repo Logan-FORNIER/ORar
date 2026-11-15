@@ -7,6 +7,7 @@ import {
   Activity,
   Archive,
   ArrowUp,
+  ArrowUpCircle,
   ArrowUpDown,
   Binary,
   Check,
@@ -48,7 +49,9 @@ import { OrarLogo } from './components/OrarLogo';
 import { PasswordModal } from './components/PasswordModal';
 import { PreviewPane } from './components/PreviewPane';
 import { ToolsCenterModal } from './components/ToolsCenterModal';
+import { UpdateModal } from './components/UpdateModal';
 import {
+  AppUpdateInfo,
   ArchiveEntry,
   ArchiveInfo,
   ArchiveMutationRequest,
@@ -64,6 +67,7 @@ import {
   SortDirection,
   SortField,
   ToolsTab,
+  UpdateInstallReport,
 } from './types';
 import {
   buildFolderTree,
@@ -122,6 +126,12 @@ export function App() {
   const [createModalOpen, setCreateModalOpen] = useState<boolean>(false);
   const [createInitialSources, setCreateInitialSources] = useState<string[]>([]);
   const [integrityReport, setIntegrityReport] = useState<IntegrityReport | null>(null);
+
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
+  const [updateChecking, setUpdateChecking] = useState<boolean>(false);
+  const [updateInstalling, setUpdateInstalling] = useState<boolean>(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   const [toolsModalOpen, setToolsModalOpen] = useState<boolean>(false);
   const [toolsInitialTab, setToolsInitialTab] = useState<ToolsTab>('analytics');
@@ -221,8 +231,58 @@ export function App() {
     [showStatus]
   );
 
+  const handleCheckUpdates = useCallback(
+    async (silent = false) => {
+      setUpdateChecking(true);
+      if (!silent) setUpdateError(null);
+      try {
+        const info = await invoke<AppUpdateInfo>('check_app_update');
+        setUpdateInfo(info);
+        setUpdateError(null);
+        if (!silent && !info.updateAvailable) {
+          showStatus('ok', `ORar v${info.currentVersion} est à jour.`);
+        }
+      } catch (err) {
+        if (!silent) {
+          setUpdateError(String(err));
+        }
+      } finally {
+        setUpdateChecking(false);
+      }
+    },
+    [showStatus]
+  );
+
+  const handleDownloadAndInstallUpdate = useCallback(async () => {
+    if (!updateInfo?.installerUrl) return;
+    setUpdateInstalling(true);
+    setUpdateError(null);
+    try {
+      const report = await invoke<UpdateInstallReport>('download_and_install_update', {
+        installerUrl: updateInfo.installerUrl,
+        installerName: updateInfo.installerName,
+      });
+      showStatus('ok', report.message);
+    } catch (err) {
+      setUpdateError(String(err));
+      showStatus('err', String(err));
+    } finally {
+      setUpdateInstalling(false);
+    }
+  }, [showStatus, updateInfo]);
+
+  const handleOpenReleasesPage = useCallback(async () => {
+    const url = updateInfo?.htmlUrl || 'https://github.com/Logan-FORNIER/ORar/releases';
+    try {
+      await invoke('open_external_url', { url });
+    } catch (err) {
+      showStatus('err', String(err));
+    }
+  }, [showStatus, updateInfo]);
+
   useEffect(() => {
     loadDirectory();
+    handleCheckUpdates(true);
   }, [loadDirectory]);
 
   const requestPassword = useCallback(
@@ -1113,6 +1173,28 @@ export function App() {
                 <span className="text-base font-bold tracking-tight text-slate-900 dark:text-white">
                   ORar
                 </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUpdateModalOpen(true);
+                    handleCheckUpdates(false);
+                  }}
+                  title={
+                    updateInfo?.updateAvailable
+                      ? `Mise à jour disponible : ${updateInfo.tagName} (cliquer pour installer)`
+                      : 'Vérifier les mises à jour et releases GitHub'
+                  }
+                  className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold transition ${
+                    updateInfo?.updateAvailable
+                      ? 'animate-pulse bg-emerald-500/20 text-emerald-700 ring-1 ring-emerald-500/40 hover:bg-emerald-500/30 dark:text-emerald-300'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {updateInfo?.updateAvailable && <ArrowUpCircle className="h-3 w-3" />}
+                  {updateInfo?.updateAvailable
+                    ? `MAJ ${updateInfo.tagName}`
+                    : `v${updateInfo?.currentVersion ?? '0.1.0'}`}
+                </button>
                 {archive && (
                   <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
                     .{archive.format}
@@ -2213,6 +2295,17 @@ export function App() {
           requestPassword(reason, archive?.fileName ?? 'Archive', onSuccess)
         }
         onNotify={showStatus}
+      />
+      <UpdateModal
+        isOpen={updateModalOpen}
+        info={updateInfo}
+        checking={updateChecking}
+        installing={updateInstalling}
+        error={updateError}
+        onClose={() => setUpdateModalOpen(false)}
+        onCheck={() => handleCheckUpdates(false)}
+        onInstall={handleDownloadAndInstallUpdate}
+        onOpenReleases={handleOpenReleasesPage}
       />
     </div>
   );

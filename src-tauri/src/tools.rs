@@ -22,11 +22,11 @@ use crate::archive::{
     create_archive, extract_archive, inspect_archive, read_archive_entry_bytes,
 };
 use crate::types::{
-    entry_basename, hex_encode, normalize_archive_path, ArchiveDiffItem, ArchiveDiffReport,
-    ArchiveEntry, ArchiveInfo, BatchOperationReport, BatchOperationRequest, BenchmarkResult,
-    ContentSearchMatch, ConvertArchiveRequest, CreateArchiveRequest, EntryHashes,
+    entry_basename, hex_encode, normalize_archive_path, AppUpdateInfo, ArchiveDiffItem,
+    ArchiveDiffReport, ArchiveEntry, ArchiveInfo, BatchOperationReport, BatchOperationRequest,
+    BenchmarkResult, ContentSearchMatch, ConvertArchiveRequest, CreateArchiveRequest, EntryHashes,
     ExtractArchiveRequest, SfxReport, SplitReport, StegoCreateRequest, StegoReport,
-    WindowsIntegrationStatus,
+    UpdateInstallReport, WindowsIntegrationStatus,
 };
 
 const MAX_HASH_BYTES: usize = 512 * 1024 * 1024;
@@ -1256,6 +1256,331 @@ pub fn create_sfx_bundle(
     })
 }
 
+pub const DEFAULT_GITHUB_REPO: &str = "Logan-FORNIER/ORar";
+
+fn system_command(program: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+fn parse_semver_parts(raw: &str) -> Option<(u64, u64, u64, bool)> {
+    let trimmed = raw.trim().trim_start_matches(['v', 'V']);
+    let (core, is_prerelease) = match trimmed.split_once('-') {
+        Some((left, right)) => (left, !right.trim().is_empty()),
+        None => (trimmed, false),
+    };
+    let mut nums = core.split('.');
+    let major = nums.next()?.parse::<u64>().ok()?;
+    let minor = nums.next()?.parse::<u64>().ok()?;
+    let patch = nums.next()?.parse::<u64>().ok()?;
+    if nums.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch, is_prerelease))
+}
+
+/// Return true if `candidate` represents a strictly newer SemVer version than `current`.
+pub fn is_version_newer(current: &str, candidate: &str) -> bool {
+    let (Some((cmaj, cmin, cpat, cpre)), Some((nmaj, nmin, npat, npre))) =
+        (parse_semver_parts(current), parse_semver_parts(candidate))
+    else {
+        return false;
+    };
+    match (nmaj, nmin, npat).cmp(&(cmaj, cmin, cpat)) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => cpre && !npre,
+    }
+}
+
+/// Parse a GitHub Releases `/releases/latest` JSON payload into `AppUpdateInfo`.
+pub fn parse_github_release_json(
+    current_version: &str,
+    repo: &str,
+    raw_json: &str,
+) -> Result<AppUpdateInfo, String> {
+    let val: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|e| format!("Réponse GitHub Releases invalide : {e}"))?;
+
+    if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
+        if msg.eq_ignore_ascii_case("Not Found") {
+            return Ok(AppUpdateInfo {
+                current_version: current_version.to_string(),
+                latest_version: current_version.to_string(),
+                tag_name: format!("v{}", current_version.trim_start_matches(['v', 'V'])),
+                update_available: false,
+                release_name: "Aucune release publiée pour le moment".into(),
+                release_notes: "Poussez un tag v* (ex: npm run release -- patch) pour publier votre première release GitHub.".into(),
+                published_at: None,
+                html_url: format!("https://github.com/{repo}/releases"),
+                installer_url: None,
+                installer_name: None,
+                installer_size: None,
+            });
+        }
+        return Err(format!("GitHub API : {msg}"));
+    }
+
+    let tag_name = val
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Champ tag_name absent de la réponse GitHub Releases.".to_string())?
+        .to_string();
+
+    let latest_version = tag_name.trim_start_matches(['v', 'V']).to_string();
+    let update_available = is_version_newer(current_version, &latest_version);
+
+    let release_name = val
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&tag_name)
+        .to_string();
+
+    let release_notes = val
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let published_at = val
+        .get("published_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let html_url = val
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://github.com/{repo}/releases/tag/{tag_name}"));
+
+    let mut chosen: Option<(u8, String, String, Option<u64>)> = None;
+    if let Some(assets) = val.get("assets").and_then(|v| v.as_array()) {
+        for asset in assets {
+            let Some(name) = asset.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(dl_url) = asset.get("browser_download_url").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let lower = name.to_lowercase();
+            if lower.ends_with(".sig") || lower.ends_with(".sha256") || lower.ends_with(".blockmap")
+            {
+                continue;
+            }
+            let priority = if lower.ends_with(".exe") {
+                3
+            } else if lower.ends_with(".msi") {
+                2
+            } else if lower.ends_with(".zip") {
+                1
+            } else {
+                0
+            };
+            if priority == 0 {
+                continue;
+            }
+            let size = asset.get("size").and_then(|v| v.as_u64());
+            let replace = match &chosen {
+                None => true,
+                Some((best_p, _, _, _)) => priority > *best_p,
+            };
+            if replace {
+                chosen = Some((priority, dl_url.to_string(), name.to_string(), size));
+            }
+        }
+    }
+
+    let (installer_url, installer_name, installer_size) = match chosen {
+        Some((_, url, name, size)) => (Some(url), Some(name), size),
+        None => (None, None, None),
+    };
+
+    Ok(AppUpdateInfo {
+        current_version: current_version.to_string(),
+        latest_version,
+        tag_name,
+        update_available,
+        release_name,
+        release_notes,
+        published_at,
+        html_url,
+        installer_url,
+        installer_name,
+        installer_size,
+    })
+}
+
+/// Query GitHub Releases for the newest ORar release.
+pub fn check_app_update(repo_override: Option<&str>) -> Result<AppUpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let repo = repo_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_GITHUB_REPO);
+    let endpoint = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
+
+    let output = system_command(curl_bin)
+        .args([
+            "-sSL",
+            "--connect-timeout",
+            "8",
+            "--max-time",
+            "15",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: ORar-Updater",
+            &endpoint,
+        ])
+        .output()
+        .map_err(|e| format!("Impossible d'interroger GitHub Releases : {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Échec de vérification des mises à jour : {}",
+            stderr.trim()
+        ));
+    }
+
+    let raw = String::from_utf8(output.stdout)
+        .map_err(|_| "Réponse GitHub non UTF-8.".to_string())?;
+    parse_github_release_json(current_version, repo, &raw)
+}
+
+/// Download a release installer from GitHub into `%TEMP%\orar_updates` and launch it.
+pub fn download_and_install_update(
+    installer_url: &str,
+    installer_name: Option<&str>,
+) -> Result<UpdateInstallReport, String> {
+    let trimmed_url = installer_url.trim();
+    if !(trimmed_url.starts_with("https://github.com/")
+        || trimmed_url.starts_with("https://objects.githubusercontent.com/")
+        || trimmed_url.starts_with("https://release-assets.githubusercontent.com/"))
+    {
+        return Err("URL de téléchargement refusée : domaine GitHub Releases requis.".into());
+    }
+
+    let raw_name = installer_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| trimmed_url.split('/').last().filter(|s| !s.is_empty()))
+        .unwrap_or("ORar-Setup.exe");
+    let safe_name = Path::new(raw_name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ORar-Setup.exe".into());
+
+    let updates_dir = std::env::temp_dir().join("orar_updates");
+    fs::create_dir_all(&updates_dir)
+        .map_err(|e| format!("Impossible de créer le dossier de mise à jour : {e}"))?;
+    let dest_path = updates_dir.join(&safe_name);
+    let dest_str = dest_path.to_string_lossy().to_string();
+
+    let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let output = system_command(curl_bin)
+        .args([
+            "-fSL",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "180",
+            "-o",
+            &dest_str,
+            trimmed_url,
+        ])
+        .output()
+        .map_err(|e| format!("Erreur de téléchargement de la mise à jour : {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Échec du téléchargement de l'installeur : {}",
+            stderr.trim()
+        ));
+    }
+
+    let downloaded_size = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
+    if downloaded_size == 0 {
+        return Err("Le fichier téléchargé est vide.".into());
+    }
+
+    let launched = {
+        #[cfg(windows)]
+        {
+            system_command("cmd")
+                .args(["/C", "start", "", &dest_str])
+                .spawn()
+                .map_err(|e| format!("Impossible de lancer l'installeur téléchargé : {e}"))?;
+            true
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg(&dest_path).spawn().is_ok()
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = &dest_path;
+            false
+        }
+    };
+
+    Ok(UpdateInstallReport {
+        downloaded_path: dest_str,
+        launched,
+        message: if launched {
+            format!("Installeur téléchargé et lancé : {safe_name}")
+        } else {
+            format!("Mise à jour téléchargée dans : {}", updates_dir.display())
+        },
+    })
+}
+
+/// Open an HTTPS URL in the user's default web browser.
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("https://") {
+        return Err("Seules les URL HTTPS sont autorisées.".into());
+    }
+    #[cfg(windows)]
+    {
+        system_command("cmd")
+            .args(["/C", "start", "", trimmed])
+            .spawn()
+            .map_err(|e| format!("Impossible d'ouvrir le navigateur : {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("Impossible d'ouvrir le navigateur : {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("Impossible d'ouvrir le navigateur : {e}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1645,5 +1970,61 @@ mod tests {
         let sfx_text = fs::read_to_string(&sfx.sfx_output_path).expect("read sfx cmd");
         assert!(sfx_text.contains("::ORAR-SFX-PAYLOAD-BEGIN::"));
         assert!(sfx.sfx_size > 200);
+    }
+
+    #[test]
+    fn semver_and_github_release_update_parser() {
+        assert!(is_version_newer("0.1.0", "0.1.1"));
+        assert!(is_version_newer("0.1.9", "0.2.0"));
+        assert!(is_version_newer("0.9.9", "1.0.0"));
+        assert!(is_version_newer("0.2.0-beta.1", "0.2.0"));
+        assert!(!is_version_newer("0.2.0", "0.2.0"));
+        assert!(!is_version_newer("1.0.0", "0.9.5"));
+
+        let release_json = r####"{
+            "tag_name": "v0.2.0",
+            "name": "ORar v0.2.0",
+            "body": "## Nouveautés\n- Déduplication .orar\n- Auto-updater",
+            "published_at": "2026-11-15T05:00:00Z",
+            "html_url": "https://github.com/Logan-FORNIER/ORar/releases/tag/v0.2.0",
+            "assets": [
+                {
+                    "name": "ORar_0.2.0_x64_en-US.msi",
+                    "size": 5242880,
+                    "browser_download_url": "https://github.com/Logan-FORNIER/ORar/releases/download/v0.2.0/ORar_0.2.0_x64_en-US.msi"
+                },
+                {
+                    "name": "ORar_0.2.0_x64-setup.exe",
+                    "size": 4194304,
+                    "browser_download_url": "https://github.com/Logan-FORNIER/ORar/releases/download/v0.2.0/ORar_0.2.0_x64-setup.exe"
+                },
+                {
+                    "name": "ORar_0.2.0_x64-setup.exe.sig",
+                    "size": 256,
+                    "browser_download_url": "https://github.com/Logan-FORNIER/ORar/releases/download/v0.2.0/ORar_0.2.0_x64-setup.exe.sig"
+                }
+            ]
+        }"####;
+
+        let info = parse_github_release_json("0.1.0", DEFAULT_GITHUB_REPO, release_json)
+            .expect("parse release json");
+        assert!(info.update_available);
+        assert_eq!(info.latest_version, "0.2.0");
+        assert_eq!(info.tag_name, "v0.2.0");
+        assert_eq!(
+            info.installer_name.as_deref(),
+            Some("ORar_0.2.0_x64-setup.exe")
+        );
+        assert_eq!(info.installer_size, Some(4_194_304));
+
+        let not_found_json = r#"{"message":"Not Found","documentation_url":"https://docs.github.com"}"#;
+        let empty = parse_github_release_json("0.1.0", DEFAULT_GITHUB_REPO, not_found_json)
+            .expect("parse not found release");
+        assert!(!empty.update_available);
+        assert_eq!(empty.tag_name, "v0.1.0");
+        assert_eq!(
+            empty.html_url,
+            "https://github.com/Logan-FORNIER/ORar/releases"
+        );
     }
 }

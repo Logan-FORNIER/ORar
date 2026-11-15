@@ -281,3 +281,23 @@ export interface FolderTreeNode {
   children: FolderTreeNode[];
   fileCount: number;
 }
+
+export interface AppUpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  tagName: string;
+  updateAvailable: boolean;
+  releaseName: string;
+  releaseNotes: string;
+  publishedAt: string | null;
+  htmlUrl: string;
+  installerUrl: string | null;
+  installerName: string | null;
+  installerSize: number | null;
+}
+
+export interface UpdateInstallReport {
+  downloadedPath: string;
+  launched: boolean;
+  message: string;
+}
